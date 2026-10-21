@@ -3,6 +3,7 @@ import os
 import shutil
 import string
 import subprocess
+import zlib
 from io import BytesIO
 from itertools import product as cartesian_product
 from pathlib import Path
@@ -12,8 +13,8 @@ from unittest import mock
 import pytest
 from PIL import Image, ImageOps
 
-from pypdf import PdfReader
-from pypdf.errors import DependencyError, DeprecationError, PdfReadError, PdfStreamError
+from pypdf import PdfReader, PdfWriter
+from pypdf.errors import DependencyError, DeprecationError, LimitReachedError, PdfReadError, PdfStreamError
 from pypdf.filters import (
     ASCII85Decode,
     ASCIIHexDecode,
@@ -23,11 +24,14 @@ from pypdf.filters import (
     FlateDecode,
     JBIG2Decode,
     RunLengthDecode,
+    _decompress_with_limit,
+    decompress,
 )
 from pypdf.generic import (
     ArrayObject,
     ContentStream,
     DictionaryObject,
+    EncodedStreamObject,
     IndirectObject,
     NameObject,
     NullObject,
@@ -681,12 +685,15 @@ def test_ccitt_fax_decode__black_is_1():
 def test_flate_decode__image_is_none_due_to_size_limit(caplog):
     url = "https://github.com/user-attachments/files/19464256/file.pdf"
     name = "issue3220.pdf"
-    reader = PdfReader(BytesIO(get_data_from_url(url, name=name)))
-    images = reader.pages[0].images
-    assert len(images) == 1
-    image = images[0]
-    assert image.name == "Im0.png"
-    assert image.image is None
+
+    with mock.patch("pypdf.filters.ZLIB_MAX_OUTPUT_LENGTH", 0):
+        reader = PdfReader(BytesIO(get_data_from_url(url, name=name)))
+        images = reader.pages[0].images
+        assert len(images) == 1
+        image = images[0]
+        assert image.name == "Im0.png"
+        assert image.image is None
+
     assert (
         "Failed loading image: Image size (180000000 pixels) exceeds limit of "
         "178956970 pixels, could be decompression bomb DOS attack."
@@ -852,3 +859,96 @@ def test_rle_decode_exception_with_corrupted_stream():
     )
     with pytest.raises(PdfStreamError, match="Early EOD in RunLengthDecode"):
         RunLengthDecode.decode(data)
+
+
+def test_decompress():
+    data = string.printable.encode("utf-8") + string.printable[::-1].encode("utf-8")
+    compressed = FlateDecode.encode(data)
+
+    # # Decompress regularly.
+    decompressed = decompress(compressed)
+    assert decompressed == data
+
+    # # Decompress byte-wise.
+    with mock.patch("pypdf.filters._decompress_with_limit", side_effect=zlib.error):
+        decompressed = decompress(compressed)
+        assert decompressed == data
+
+    # Decompress byte-wise with very low output limit.
+    with mock.patch("pypdf.filters._decompress_with_limit", side_effect=zlib.error), \
+            mock.patch("pypdf.filters.ZLIB_MAX_OUTPUT_LENGTH", len(compressed) - 13), \
+            pytest.raises(
+                LimitReachedError, match=r"^Limit reached while decompressing\. 12 bytes remaining\."
+            ):
+        decompress(compressed)
+
+
+def test_decompress__byte_wise_without_limit():
+    data = string.printable.encode("utf-8") * 10
+    compressed = FlateDecode.encode(data)
+
+    # A limit of `0` disables the output limit, including for the byte-wise fallback.
+    with mock.patch("pypdf.filters._decompress_with_limit", side_effect=zlib.error), \
+            mock.patch("pypdf.filters.ZLIB_MAX_OUTPUT_LENGTH", 0):
+        assert decompress(compressed) == data
+
+    # The regular path has no limit either.
+    with mock.patch("pypdf.filters.ZLIB_MAX_OUTPUT_LENGTH", 0):
+        assert decompress(compressed) == data
+
+
+def test_flate_decode__decompression_bomb_default_limit():
+    # About 100 MB of zeros compress to roughly 100 kB.
+    compressor = zlib.compressobj()
+    chunk = b"\x00" * 1_000_000
+    bomb = b"".join(compressor.compress(chunk) for _ in range(100)) + compressor.flush()
+    assert len(bomb) < 1_000_000
+
+    with pytest.raises(LimitReachedError, match=r"^Limit reached while decompressing\. \d+ bytes remaining\.$"):
+        FlateDecode.decode(bomb)
+
+
+def test_decompress__decompression_bomb_tail_cut_off_fallback():
+    bomb = zlib.compress(b"\x00" * 1_000_000)
+    real_decompress_with_limit = _decompress_with_limit
+    calls = []
+
+    def fail_first_call(data: bytes) -> bytes:
+        calls.append(data)
+        if len(calls) == 1:
+            raise zlib.error("Error -3 while decompressing data: invalid distance too far back")
+        return real_decompress_with_limit(data)
+
+    # The fallback which cuts off some tail bytes is limited as well.
+    with mock.patch("pypdf.filters._decompress_with_limit", side_effect=fail_first_call), \
+            mock.patch("pypdf.filters.ZLIB_MAX_OUTPUT_LENGTH", 10_000), \
+            pytest.raises(LimitReachedError, match=r"^Limit reached while decompressing\. \d+ bytes remaining\.$"):
+        decompress(bomb)
+    assert calls == [bomb, bomb[:-1]]
+
+
+def test_flate_decode__content_stream_bomb_with_chained_filters():
+    payload = b"0 0 m\n" * 100_000
+    # A series of FlateDecode filters, where only the last one explodes.
+    inner = zlib.compress(payload)
+    outer = zlib.compress(inner)
+
+    writer = PdfWriter()
+    page = writer.add_blank_page(100, 100)
+    content = EncodedStreamObject()
+    content[NameObject("/Filter")] = ArrayObject([NameObject("/FlateDecode"), NameObject("/FlateDecode")])
+    content._data = outer
+    page[NameObject("/Contents")] = writer._add_object(content)
+    output = BytesIO()
+    writer.write(output)
+    pdf_data = output.getvalue()
+
+    # Explicitly accessing the content stream must not exceed the limit.
+    reader = PdfReader(BytesIO(pdf_data))
+    with mock.patch("pypdf.filters.ZLIB_MAX_OUTPUT_LENGTH", 10_000), \
+            pytest.raises(LimitReachedError, match=r"^Limit reached while decompressing\. \d+ bytes remaining\.$"):
+        reader.pages[0].get_contents()
+
+    # With the default limit, the content stream is decoded as usual.
+    reader = PdfReader(BytesIO(pdf_data))
+    assert reader.pages[0]["/Contents"].get_object().get_data() == payload

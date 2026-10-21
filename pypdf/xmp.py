@@ -17,9 +17,10 @@ from typing import (
     TypeVar,
     Union,
 )
-from xml.dom.minidom import Document, parseString
+from xml.dom.expatbuilder import ExpatBuilderNS
+from xml.dom.minidom import Document
 from xml.dom.minidom import Element as XmlElement
-from xml.parsers.expat import ExpatError
+from xml.parsers.expat import ExpatError, XMLParserType
 
 from ._protocols import XmpInformationProtocol
 from ._utils import StreamType, deprecate_no_replacement, deprecate_with_replacement
@@ -222,6 +223,34 @@ def _getter_single(
     return get
 
 
+class _XmpBuilder(ExpatBuilderNS):
+    """
+    Custom XML parser denying all entity declarations.
+
+    This is a stripped down and typed version inspired by what *defusedxml* does.
+
+    Why do we need this? The default limits of *libexpat* used by Python only block exponential entity expansion,
+    but not cases like quadratic entity expansion which can still cause quite some memory usage.
+    """
+
+    def custom_entity_declaration_handler(
+            self,
+            entity_name: str,
+            is_parameter_entity: bool,
+            value: Optional[str],
+            base: Optional[str],
+            system_id: str,
+            public_id: Optional[str],
+            notation_name: Optional[str],
+    ) -> None:
+        raise ExpatError(f"Forbidden entities: {entity_name!r}")
+
+    def install(self, parser: XMLParserType) -> None:
+        super().install(parser)
+
+        parser.EntityDeclHandler = self.custom_entity_declaration_handler
+
+
 class XmpInformation(XmpInformationProtocol, PdfObject):
     """
     An object that represents Extensible Metadata Platform (XMP) metadata.
@@ -236,7 +265,7 @@ class XmpInformation(XmpInformationProtocol, PdfObject):
         self.stream = stream
         try:
             data = self.stream.get_data()
-            doc_root: Document = parseString(data)  # noqa: S318
+            doc_root: Document = _XmpBuilder().parseString(data)
         except (AttributeError, ExpatError) as e:
             raise PdfReadError(f"XML in XmpInformation was invalid: {e}")
         self.rdf_root: XmlElement = doc_root.getElementsByTagNameNS(

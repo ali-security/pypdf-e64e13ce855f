@@ -3034,7 +3034,14 @@ class PdfWriter(PdfDocCommon):
         first_article = cast("DictionaryObject", thread["/F"])
         current_article: Optional[DictionaryObject] = first_article
         new_article: Optional[DictionaryObject] = None
+
+        visited: Set[int] = set()
         while current_article is not None:
+            article_id = id(current_article)
+            if article_id in visited:
+                raise LimitReachedError("Detected cyclic article structure.")
+            visited.add(article_id)
+
             pag = self._get_cloned_page(
                 cast("PageObject", current_article["/P"]), pages, reader
             )

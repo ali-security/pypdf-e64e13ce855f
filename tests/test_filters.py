@@ -1008,3 +1008,9 @@ def test_runlengthdecode__content_stream_bomb():
             pytest.raises(LimitReachedError, match=r"^Limit reached while decompressing\.$"):
         RunLengthDecode.decode(literal)
     assert RunLengthDecode.decode(literal) == b"A" * 12_800
+
+
+@pytest.mark.timeout(10)
+def test_asciihexdecode__speed():
+    encoded = (b"41" * 1_200_000) + b">"
+    ASCIIHexDecode.decode(encoded)

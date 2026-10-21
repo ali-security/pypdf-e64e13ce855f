@@ -959,3 +959,52 @@ def test_flate_decode__content_stream_bomb_with_chained_filters():
     # With the default limit, the content stream is decoded as usual.
     reader = PdfReader(BytesIO(pdf_data))
     assert reader.pages[0]["/Contents"].get_object().get_data() == payload
+
+
+def test_runlengthdecode__decode_limit():
+    uncompressed_size = 76 * 1024 * 1024  # 76 MB target
+    runs = uncompressed_size // 128
+    encoded = (b"\x81A" * runs) + b"\x80"
+
+    with pytest.raises(expected_exception=LimitReachedError, match=r"^Limit reached while decompressing\.$"):
+        RunLengthDecode.decode(encoded)
+
+    uncompressed_size = 5 * 1024
+    runs = uncompressed_size // 128
+    encoded = (b"\x81A" * runs) + b"\x80"
+
+    # Use a very low limit for this exact comparison, otherwise *pytest* takes ages to render a failure diff.
+    with mock.patch("pypdf.filters.RUN_LENGTH_MAX_OUTPUT_LENGTH", uncompressed_size):
+        assert RunLengthDecode.decode(encoded) == b"A" * uncompressed_size
+
+
+def test_runlengthdecode__content_stream_bomb():
+    # Each 2-byte repeat run expands to 128 bytes of output.
+    encoded = (b"\x81 " * 1000) + b"\x80"
+
+    writer = PdfWriter()
+    page = writer.add_blank_page(100, 100)
+    content = EncodedStreamObject()
+    content[NameObject("/Filter")] = NameObject("/RunLengthDecode")
+    content._data = encoded
+    page[NameObject("/Contents")] = writer._add_object(content)
+    output = BytesIO()
+    writer.write(output)
+    pdf_data = output.getvalue()
+
+    # Accessing the content stream through the reader must not exceed the limit.
+    reader = PdfReader(BytesIO(pdf_data))
+    with mock.patch("pypdf.filters.RUN_LENGTH_MAX_OUTPUT_LENGTH", 10_000), \
+            pytest.raises(LimitReachedError, match=r"^Limit reached while decompressing\.$"):
+        reader.pages[0].get_contents()
+
+    # With the default limit, the content stream is decoded as usual.
+    reader = PdfReader(BytesIO(pdf_data))
+    assert reader.pages[0]["/Contents"].get_object().get_data() == b" " * 128_000
+
+    # Literal runs count towards the limit as well.
+    literal = (b"\x7f" + b"A" * 128) * 100 + b"\x80"
+    with mock.patch("pypdf.filters.RUN_LENGTH_MAX_OUTPUT_LENGTH", 10_000), \
+            pytest.raises(LimitReachedError, match=r"^Limit reached while decompressing\.$"):
+        RunLengthDecode.decode(literal)
+    assert RunLengthDecode.decode(literal) == b"A" * 12_800

@@ -1172,7 +1172,7 @@ class PdfDocCommon:
         )
         if inherit is None:
             inherit = {}
-        if pages is None:
+        if is_null_or_none(pages):
             # Fix issue 327: set flattened_pages attribute only for
             # decrypted file
             catalog = self.root_object
@@ -1180,6 +1180,7 @@ class PdfDocCommon:
             if not isinstance(pages, DictionaryObject):
                 raise PdfReadError("Invalid object in /Pages")
             self.flattened_pages = []
+        assert pages is not None, "mypy"
 
         if PA.TYPE in pages:
             t = cast(str, pages[PA.TYPE])

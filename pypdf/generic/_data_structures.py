@@ -69,7 +69,7 @@ from ..constants import FilterTypes as FT
 from ..constants import StreamAttributes as SA
 from ..constants import TypArguments as TA
 from ..constants import TypFitArguments as TF
-from ..errors import STREAM_TRUNCATED_PREMATURELY, PdfReadError, PdfStreamError
+from ..errors import STREAM_TRUNCATED_PREMATURELY, LimitReachedError, PdfReadError, PdfStreamError
 from ._base import (
     BooleanObject,
     ByteStringObject,
@@ -640,6 +640,10 @@ class DictionaryObject(Dict[Any, Any], PdfObject):
                 length = -1
             pstart = stream.tell()
             if length > 0:
+                from ..filters import MAX_DECLARED_STREAM_LENGTH  # noqa: PLC0415
+                if length > MAX_DECLARED_STREAM_LENGTH:
+                    raise LimitReachedError(f"Declared stream length of {length} exceeds maximum allowed length.")
+
                 data["__streamdata__"] = stream.read(length)
             else:
                 data["__streamdata__"] = read_until_regex(

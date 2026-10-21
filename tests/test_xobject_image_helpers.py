@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 
 from pypdf import PdfReader
-from pypdf._xobj_image_helpers import _extended_image_frombytes, _handle_flate
-from pypdf.errors import EmptyImageDataError, PdfReadError
+from pypdf._xobj_image_helpers import _extended_image_frombytes, _handle_flate, bits2byte
+from pypdf.errors import EmptyImageDataError, LimitReachedError, PdfReadError
 from pypdf.generic import ArrayObject, DecodedStreamObject, NameObject, NumberObject
 
 from . import get_data_from_url
@@ -160,3 +160,11 @@ def test_get_mode_and_invert_color():
     page = reader.pages[12]
     for _name, image in page.images.items():  # noqa: PERF102
         image.image.load()
+
+
+def test_bits2byte__limit() -> None:
+    with pytest.raises(
+            expected_exception=LimitReachedError,
+            match=r"^Requested buffer size 76500000 exceeds limit of 75000000\.$"
+    ):
+        bits2byte(data=b"TEST", size=(9000, 8500), bits=8)

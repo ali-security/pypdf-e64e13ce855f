@@ -80,6 +80,9 @@ ZLIB_MAX_OUTPUT_LENGTH = 75_000_000
 LZW_MAX_OUTPUT_LENGTH = 75_000_000
 RUN_LENGTH_MAX_OUTPUT_LENGTH = 75_000_000
 ZLIB_MAX_RECOVERY_INPUT_LENGTH = 5_000_000
+FLATE_MAX_COLUMNS = 250_000
+FLATE_MAX_ROW_LENGTH = 4_000_000
+FLATE_MAX_BUFFER_SIZE = 75_000_000
 
 # Reuse cached 1-byte values in the fallback loop to avoid per-byte allocations.
 _SINGLE_BYTES = tuple(bytes((i,)) for i in range(256))
@@ -204,10 +207,19 @@ class FlateDecode:
                 columns = cast(int, decode_parms[LZW.COLUMNS].get_object())  # type: ignore
             except (TypeError, KeyError):
                 columns = 1
+            if columns > FLATE_MAX_COLUMNS:
+                raise LimitReachedError(f"Number of columns {columns} exceeds defined limit of {FLATE_MAX_COLUMNS}.")
+
             try:
                 colors = cast(int, decode_parms[LZW.COLORS].get_object())  # type: ignore
             except (TypeError, KeyError):
                 colors = 1
+            if colors > 16:
+                raise LimitReachedError(
+                    f"Color value {colors} exceeds limit of 16. "
+                    f"Please open an issue if this limits valid use cases."
+                )
+
             try:
                 bits_per_component = cast(
                     int,
@@ -215,11 +227,17 @@ class FlateDecode:
                 )
             except (TypeError, KeyError):
                 bits_per_component = DEFAULT_BITS_PER_COMPONENT
+            if bits_per_component > 16:
+                raise PdfReadError(f"More than 16 bits per component are not allowed: {bits_per_component}")
 
             # PNG predictor can vary by row and so is the lead byte on each row
             rowlength = (
                 math.ceil(columns * colors * bits_per_component / 8) + 1
             )  # number of bytes
+            if rowlength > FLATE_MAX_ROW_LENGTH:
+                raise LimitReachedError(
+                    f"Row length of {rowlength} exceeds defined limit of {FLATE_MAX_ROW_LENGTH}."
+                )
 
             # TIFF prediction:
             if predictor == 2:

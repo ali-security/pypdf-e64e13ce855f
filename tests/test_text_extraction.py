@@ -668,3 +668,72 @@ def test_page__extract_text__xform__repeated_non_cyclic_references(caplog):
 
     assert page.extract_text().count("Hello") == 2
     assert not any("cyclic form XObject" in message for message in caplog.messages)
+
+
+@pytest.mark.timeout(5)
+def test_page_object__layout_mode_fonts__cyclic(caplog) -> None:
+    from pypdf._cmap import build_char_map_from_dict  # noqa: PLC0415
+    from pypdf._text_extraction._layout_mode._font import Font  # noqa: PLC0415
+
+    writer = PdfWriter()
+
+    font = DictionaryObject({
+        NameObject("/Type"): NameObject("/Font"),
+        NameObject("/Subtype"): NameObject("/Type1"),
+        NameObject("/BaseFont"): NameObject("/Helvetica"),
+    })
+    fonts = {"/F1": Font(*build_char_map_from_dict(200.0, font), font)}
+    writer.add_blank_page(width=10, height=10)
+    page = writer.pages[0]
+    # Layout mode builds each font from the page's own /Resources entry.
+    page[NameObject("/Resources")] = DictionaryObject({
+        NameObject("/Font"): DictionaryObject({
+            NameObject("/F1"): font
+        })
+    })
+    dictionary2 = DictionaryObject(DictionaryObject({
+        NameObject("/Resources"): DictionaryObject({
+            NameObject("/Font"): DictionaryObject({
+                NameObject("/F1"): font
+            })
+        })
+    }))
+    reference2 = writer._add_object(dictionary2)
+    dictionary3 = DictionaryObject({NameObject("/Parent"): reference2})
+    reference3 = writer._add_object(dictionary3)
+    page[NameObject("/Parent")] = reference3
+    dictionary2[NameObject("/Parent")] = page.indirect_reference
+    page.pdf = writer
+
+    assert page._layout_mode_fonts() == fonts
+    assert caplog.messages == ["Detected cycle in /Parent hierarchy when retrieving fonts."]
+
+
+@pytest.mark.timeout(5)
+def test_page__extract_text__layout_mode__cyclic_parent(caplog) -> None:
+    writer = PdfWriter()
+    writer.add_blank_page(width=100, height=100)
+    page = writer.pages[0]
+    page.pdf = writer
+
+    font = DictionaryObject({
+        NameObject("/Type"): NameObject("/Font"),
+        NameObject("/Subtype"): NameObject("/Type1"),
+        NameObject("/BaseFont"): NameObject("/Helvetica"),
+    })
+    page[NameObject("/Resources")] = DictionaryObject({
+        NameObject("/Font"): DictionaryObject({
+            NameObject("/F1"): font
+        })
+    })
+    content = ContentStream(stream=None, pdf=writer)
+    content.set_data(b"BT /F1 12 Tf 10 50 Td (Hello) Tj ET")
+    page.replace_contents(content)
+
+    dictionary2 = DictionaryObject()
+    reference2 = writer._add_object(dictionary2)
+    page[NameObject("/Parent")] = reference2
+    dictionary2[NameObject("/Parent")] = page.indirect_reference
+
+    assert "Hello" in page.extract_text(extraction_mode="layout")
+    assert caplog.messages.count("Detected cycle in /Parent hierarchy when retrieving fonts.") == 1

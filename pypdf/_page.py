@@ -1844,7 +1844,14 @@ class PageObject(DictionaryObject):
         # Font retrieval logic adapted from pypdf.PageObject._extract_text()
         objr: Any = self
         fonts: Dict[str, _layout_mode.Font] = {}
+        visited: Set[int] = set()
         while objr is not None:
+            objr_id = id(objr)
+            if objr_id in visited:
+                logger_warning("Detected cycle in /Parent hierarchy when retrieving fonts.", __name__)
+                break
+            visited.add(objr_id)
+
             try:
                 resources_dict: Any = objr[PG.RESOURCES]
             except KeyError:

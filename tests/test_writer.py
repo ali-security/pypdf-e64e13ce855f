@@ -2938,3 +2938,116 @@ def test_clone_reader_document_root__incremental__unknown_object():
     reader = PdfReader(RESOURCE_ROOT / "crazyones.pdf")
     with mock.patch.object(writer, "_collect_incremental_clone_object_ids", return_value=[*list(range(1, 23)), 42]):
         writer.clone_reader_document_root(reader)
+
+
+@pytest.mark.timeout(5)
+def test_get_filtered_outline__first__cyclic(caplog) -> None:
+    writer = PdfWriter()
+    reader = PdfReader(RESOURCE_ROOT / "crazyones.pdf")
+
+    dictionary1 = DictionaryObject({
+        NameObject("/Type"): NameObject("/Outlines")
+    })
+    reference1 = writer._add_object(dictionary1)
+    dictionary2 = DictionaryObject({
+        NameObject("/Type"): NameObject("/Outlines")
+    })
+    reference2 = writer._add_object(dictionary2)
+    dictionary3 = DictionaryObject({
+        NameObject("/First"): reference2,
+        NameObject("/Type"): NameObject("/Outlines")
+    })
+    reference3 = writer._add_object(dictionary3)
+    dictionary1[NameObject("/First")] = reference3
+    dictionary2[NameObject("/First")] = reference1
+
+    assert writer._get_filtered_outline(node=dictionary1, pages={}, reader=reader) == []
+    assert caplog.messages == ["Detected cycle in outlines."]
+
+
+@pytest.mark.timeout(5)
+def test_get_filtered_outline__next_first__cyclic(caplog) -> None:
+    writer = PdfWriter()
+    reader = PdfReader(RESOURCE_ROOT / "crazyones.pdf")
+
+    dictionary1 = DictionaryObject({
+        NameObject("/Title"): TextStringObject("test")
+    })
+    _reference1 = writer._add_object(dictionary1)
+    dictionary2 = DictionaryObject({
+        NameObject("/Type"): NameObject("/Outlines")
+    })
+    reference2 = writer._add_object(dictionary2)
+    dictionary1[NameObject("/Next")] = reference2
+    dictionary2[NameObject("/First")] = reference2
+
+    assert writer._get_filtered_outline(node=dictionary1, pages={}, reader=reader) == []
+    assert caplog.messages == ["Detected cycle in outlines."]
+
+
+@pytest.mark.timeout(5)
+def test_get_filtered_outline__next_next__cyclic(caplog) -> None:
+    writer = PdfWriter()
+    reader = PdfReader(RESOURCE_ROOT / "crazyones.pdf")
+
+    dictionary1 = DictionaryObject({
+        NameObject("/Title"): TextStringObject("test")
+    })
+    reference1 = writer._add_object(dictionary1)
+    dictionary2 = DictionaryObject({
+        NameObject("/Title"): TextStringObject("test")
+    })
+    reference2 = writer._add_object(dictionary2)
+    dictionary3 = DictionaryObject({
+        NameObject("/Next"): reference2,
+        NameObject("/Title"): TextStringObject("test")
+    })
+    reference3 = writer._add_object(dictionary3)
+    dictionary1[NameObject("/Next")] = reference3
+    dictionary2[NameObject("/Next")] = reference1
+
+    assert writer._get_filtered_outline(node=dictionary1, pages={}, reader=reader) == []
+    assert caplog.messages == ["Detected cycle in outlines."]
+
+
+def test_get_filtered_outline__node_is_none() -> None:
+    writer = PdfWriter()
+    reader = PdfReader(RESOURCE_ROOT / "crazyones.pdf")
+
+    assert writer._get_filtered_outline(node=None, pages={}, reader=reader) == []
+
+
+@pytest.mark.timeout(5)
+def test_merge__cyclic_outlines(caplog) -> None:
+    source = PdfWriter()
+    source.add_blank_page(width=10, height=10)
+    page_reference = source.pages[0].indirect_reference
+
+    item1 = DictionaryObject({
+        NameObject("/Title"): TextStringObject("one"),
+        NameObject("/Dest"): ArrayObject([page_reference, NameObject("/Fit")]),
+    })
+    reference1 = source._add_object(item1)
+    item2 = DictionaryObject({
+        NameObject("/Title"): TextStringObject("two"),
+        NameObject("/Dest"): ArrayObject([page_reference, NameObject("/Fit")]),
+        NameObject("/Next"): reference1,
+    })
+    reference2 = source._add_object(item2)
+    item1[NameObject("/Next")] = reference2
+    outlines = DictionaryObject({
+        NameObject("/Type"): NameObject("/Outlines"),
+        NameObject("/First"): reference1,
+        NameObject("/Last"): reference2,
+    })
+    source._root_object[NameObject("/Outlines")] = source._add_object(outlines)
+    data = BytesIO()
+    source.write(data)
+    data.seek(0)
+
+    reader = PdfReader(data)
+    writer = PdfWriter()
+    writer.append(reader)
+
+    assert [item.title for item in writer.outline] == ["one", "two"]
+    assert "Detected cycle in outlines." in caplog.messages

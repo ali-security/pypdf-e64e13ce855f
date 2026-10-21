@@ -74,6 +74,10 @@ from .generic import (
 
 ZLIB_MAX_OUTPUT_LENGTH = 75_000_000
 LZW_MAX_OUTPUT_LENGTH = 75_000_000
+ZLIB_MAX_RECOVERY_INPUT_LENGTH = 5_000_000
+
+# Reuse cached 1-byte values in the fallback loop to avoid per-byte allocations.
+_SINGLE_BYTES = tuple(bytes((i,)) for i in range(256))
 
 
 def _decompress_with_limit(data: bytes) -> bytes:
@@ -132,20 +136,24 @@ def decompress(data: bytes) -> bytes:
         decompressor = zlib.decompressobj(zlib.MAX_WBITS | 32)
         result_str = b""
         remaining_limit = ZLIB_MAX_OUTPUT_LENGTH
-        data_single_bytes = [data[i : i + 1] for i in range(len(data))]
-        for index, b in enumerate(data_single_bytes):
+        data_length = len(data)
+        for index in range(data_length):
+            chunk = _SINGLE_BYTES[data[index]]
             try:
-                decompressed = decompressor.decompress(b, max_length=remaining_limit)
+                decompressed = decompressor.decompress(chunk, max_length=remaining_limit)
                 result_str += decompressed
                 if ZLIB_MAX_OUTPUT_LENGTH:
                     # A limit of `0` disables the output limit (see docstring above).
                     remaining_limit -= len(decompressed)
                     if remaining_limit <= 0:
                         raise LimitReachedError(
-                            f"Limit reached while decompressing. {len(data_single_bytes) - index} bytes remaining."
+                            f"Limit reached while decompressing. {data_length - index} bytes remaining."
                         )
             except zlib.error:
-                pass
+                if index > ZLIB_MAX_RECOVERY_INPUT_LENGTH:
+                    raise LimitReachedError(
+                        f"Recovery limit reached while decompressing. {data_length - index} bytes remaining."
+                    )
         return result_str
 
 

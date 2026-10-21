@@ -10,7 +10,15 @@ import pytest
 
 from pypdf import PdfReader, PdfWriter
 from pypdf.errors import PdfReadError
-from pypdf.generic import EmbeddedFile, NameObject, NullObject, ViewerPreferences
+from pypdf.generic import (
+    ArrayObject,
+    DictionaryObject,
+    EmbeddedFile,
+    NameObject,
+    NullObject,
+    TextStringObject,
+    ViewerPreferences,
+)
 from tests import get_data_from_url
 
 TESTS_ROOT = Path(__file__).parent.resolve()
@@ -194,3 +202,103 @@ def test_flatten__cyclic_references():
 
     with pytest.raises(expected_exception=PdfReadError, match=r"^Detected cyclic page references\.$"):
         reader._flatten()
+
+
+@pytest.mark.enable_socket
+@pytest.mark.timeout(10)
+def test_get_outline__cyclic_references(caplog):
+    url = "https://github.com/user-attachments/files/24859044/circular_outline.pdf"
+    name = "circular_outline.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+
+    assert reader.outline == [
+        {
+            "/%is_open%": True,
+            "/Page": reader.pages[0].indirect_reference,
+            "/Title": "Bookmark A",
+            "/Type": "/Fit"
+        },
+        {
+            "/%is_open%": True,
+            "/Page": reader.pages[0].indirect_reference,
+            "/Title": "Bookmark B",
+            "/Type": "/Fit"
+        }
+    ]
+    assert caplog.messages[0].startswith("Detected cycle in outline structure for {")
+
+
+@pytest.mark.enable_socket
+@pytest.mark.timeout(10)
+def test_get_outline__cyclic_references__nested_handling(caplog):
+    url = "https://github.com/user-attachments/files/24859044/circular_outline.pdf"
+    name = "circular_outline.pdf"
+    writer = PdfWriter(clone_from=BytesIO(get_data_from_url(url=url, name=name)))
+
+    nested_outline = DictionaryObject()
+    writer._add_object(nested_outline)
+    nested_outline.update({
+        NameObject("/Title"): TextStringObject("Nested entry"),
+        NameObject("/Parent"): writer.get_object(5),
+        NameObject("/Dest"): ArrayObject([writer.pages[0].indirect_reference, NameObject("/Fit")]),
+        NameObject("/Next"): writer.get_object(6),
+    })
+    writer.get_object(5)[NameObject("/First")] = nested_outline.indirect_reference
+    writer.get_object(6)[NameObject("/First")] = nested_outline.indirect_reference
+
+    assert writer.outline == [
+        {
+            "/%is_open%": True,
+            "/Page": writer.pages[0].indirect_reference,
+            "/Title": "Bookmark A",
+            "/Type": "/Fit"
+        },
+        [
+            {
+                "/%is_open%": True,
+                "/Page": writer.pages[0].indirect_reference,
+                "/Title": "Nested entry",
+                "/Type": "/Fit"
+            },
+            {
+                "/%is_open%": True,
+                "/Page": writer.pages[0].indirect_reference,
+                "/Title": "Bookmark B",
+                "/Type": "/Fit"
+            }
+        ],
+        {
+            "/%is_open%": True,
+            "/Page": writer.pages[0].indirect_reference,
+            "/Title": "Bookmark B",
+            "/Type": "/Fit"
+        },
+        [
+            {
+                "/%is_open%": True,
+                "/Page": writer.pages[0].indirect_reference,
+                "/Title": "Nested entry",
+                "/Type": "/Fit"
+            }
+        ]
+    ]
+    assert caplog.messages[0].startswith("Detected cycle in outline structure for {")
+
+
+@pytest.mark.enable_socket
+@pytest.mark.timeout(10)
+def test_get_outline__cyclic_references__first_points_to_ancestor(caplog):
+    url = "https://github.com/user-attachments/files/24859044/circular_outline.pdf"
+    name = "circular_outline.pdf"
+    writer = PdfWriter(clone_from=BytesIO(get_data_from_url(url=url, name=name)))
+
+    # Make the first outline item its own child.
+    bookmark_a = writer.get_object(5)
+    bookmark_a[NameObject("/First")] = bookmark_a.indirect_reference
+
+    assert [item["/Title"] for item in writer.outline] == ["Bookmark A", "Bookmark B"]
+    assert len(caplog.messages) == 2
+    assert all(
+        message.startswith("Detected cycle in outline structure for {")
+        for message in caplog.messages
+    )

@@ -1,9 +1,6 @@
 name: Create a GitHub release page
 
 on:
-  push:
-    tags:
-      - '*.*.*'
   workflow_dispatch:
 
 permissions:

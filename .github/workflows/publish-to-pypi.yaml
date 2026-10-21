@@ -1,15 +1,16 @@
 name: Publish Python Package to PyPI
 
 on:
-  push:
-    tags:
-      - '*.*.*'
   workflow_dispatch:
+
+env:
+  PIP_INDEX_URL: https://:2025-07-27T14:04:50.530148Z@time-machines-pypi.sealsecurity.io/
 
 jobs:
   build:
     name: Build distribution
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
     - uses: actions/checkout@v4
@@ -36,6 +37,8 @@ jobs:
     needs:
     - build
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: false
     environment:
       name: pypi
       url: https://pypi.org/p/pypdf

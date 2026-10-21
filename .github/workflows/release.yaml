@@ -5,9 +5,7 @@
 # and that it's announced with a GitHub release.
 name: Create git tag
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 permissions:
   contents: write

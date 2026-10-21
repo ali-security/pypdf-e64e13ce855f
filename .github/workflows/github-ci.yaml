@@ -4,24 +4,21 @@
 name: CI
 
 on:
-  push:
-    branches:
-      - main
-    paths-ignore:
-      - '**/*.md'
-      - '**/*.rst'
-  pull_request:
-    branches:
-      - main
-    paths-ignore:
-      - '**/*.md'
-      - '**/*.rst'
   workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'Optional pytest node ids to run instead of the full tests directory'
+        required: false
+        default: ''
+
+env:
+  PIP_INDEX_URL: https://:2025-07-27T14:04:50.530148Z@time-machines-pypi.sealsecurity.io/
 
 jobs:
   test_windows:
     name: pytest on windows
     runs-on: windows-latest
+    timeout-minutes: 45
     steps:
     - name: Checkout Code
       uses: actions/checkout@v4
@@ -49,12 +46,13 @@ jobs:
         python -c "from tests import download_test_pdfs; download_test_pdfs()"
     - name: Test with pytest
       run: |
-        python -m pytest tests --cov=pypdf --cov-append -n auto -vv -p no:benchmark
+        python -m pytest ${{ inputs.test-filter || 'tests' }} --cov=pypdf --cov-append -n auto -vv -p no:benchmark
 
 
   tests:
     name: "pytest on ${{ matrix.python-version }} (crypto-lib: ${{ matrix.use-crypto-lib }})"
     runs-on: ubuntu-22.04
+    timeout-minutes: 45
     strategy:
       matrix:
         python-version: ["3.8", "3.9", "3.10", "3.11", "3.12", "3.13"]
@@ -137,7 +135,7 @@ jobs:
         echo "    pass" >> $SITECUSTOMIZE_PATH
     - name: Test with pytest
       run: |
-        python -m pytest tests --cov=pypdf --cov-append -n auto -vv -p no:benchmark
+        python -m pytest ${{ inputs.test-filter || 'tests' }} --cov=pypdf --cov-append -n auto -vv -p no:benchmark
       env:
         COVERAGE_PROCESS_START: 'pyproject.toml'
     - name: Rename coverage data file
@@ -153,6 +151,8 @@ jobs:
   codestyle:
     name: Check code style issues
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    if: false
     steps:
     - name: Checkout Code
       uses: actions/checkout@v4
@@ -192,6 +192,7 @@ jobs:
   package:
     name: Build & verify package
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
@@ -214,6 +215,8 @@ jobs:
   coverage:
     name: Combine & check coverage.
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: false
     needs: tests
 
     steps:

@@ -2149,3 +2149,127 @@ def test_get_object_from_stream__size_limit(caplog):
     assert caplog.messages == [
         "Value /N 5000000 for object 3 exceeds maximum allowed value 2. Limiting to 2.",
     ]
+
+
+@pytest.mark.timeout(10)
+def test_read_standard_xref_table__malformed__speed():
+    body = (
+        b"%PDF-1.7\n"
+        b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n"
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n"
+    )
+    xref_offset = len(body)
+    corrupt_entry = b"xxxxxxxxxxxxxxxx 0\r\n"
+    assert len(corrupt_entry) == 20
+    entry_count = 20_000
+    data = (
+        body
+        + f"xref\n1 {entry_count}\n".encode("ascii")
+        + corrupt_entry * entry_count
+        + b"trailer\n<< /Size "
+        + str(entry_count + 1).encode("ascii")
+        + b" /Root 1 0 R >>\nstartxref\n"
+        + str(xref_offset).encode("ascii")
+        + b"\n%%EOF\n"
+    )
+
+    reader = PdfReader(BytesIO(data))
+    assert len(reader.pages) == 1
+
+
+def test_load_recovery_cache():
+    reader = PdfReader(RESOURCE_ROOT / "crazyones.pdf")
+
+    pdf_objects = [
+        (1, 0, 10),
+        (1, 1, 20),
+        (2, 0, 30),
+        (3, 1, 42),
+    ]
+    with mock.patch.object(reader, "_find_pdf_objects", return_value=iter(pdf_objects)):
+        assert reader._load_recovery_cache(b"") == {1: (10, 0), 2: (30, 0), 3: (42, 1)}
+
+
+class _GetBufferCountingBytesIO(BytesIO):
+    """BytesIO which counts how often the whole buffer has been requested."""
+
+    def __init__(self, data: bytes) -> None:
+        super().__init__(data)
+        self.getbuffer_calls = 0
+
+    def getbuffer(self) -> memoryview:
+        self.getbuffer_calls += 1
+        return super().getbuffer()
+
+
+_MALFORMED_XREF_BODY = (
+    b"%PDF-1.7\n"
+    b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
+    b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n"
+    b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n"
+)
+
+
+def test_read_standard_xref_table__malformed__stream_scanned_once(caplog):
+    body = _MALFORMED_XREF_BODY
+    xref_offset = len(body)
+    entry_count = 1_000
+    # A valid first entry, followed by many entries which cannot be parsed.
+    data = (
+        body
+        + f"xref\n0 {entry_count + 1}\n".encode("ascii")
+        + b"0000000000 65535 f\r\n"
+        + b"xxxxxxxxxxxxxxxx 0\r\n" * entry_count
+        + b"trailer\n<< /Size "
+        + str(entry_count + 1).encode("ascii")
+        + b" /Root 1 0 R >>\nstartxref\n"
+        + str(xref_offset).encode("ascii")
+        + b"\n%%EOF\n"
+    )
+    stream = _GetBufferCountingBytesIO(data)
+
+    reader = PdfReader(stream)
+
+    # The whole stream must not be loaded and scanned again for every invalid entry.
+    assert stream.getbuffer_calls == 1
+    # The recovered entries point to the start of the actual objects.
+    assert reader.xref[0] == {
+        1: body.index(b"1 0 obj"),
+        2: body.index(b"2 0 obj"),
+        3: body.index(b"3 0 obj"),
+    }
+    assert len(reader.pages) == 1
+    assert "entry 1 in Xref table invalid but object found" in caplog.messages
+    assert "entry 4 in Xref table invalid; object not found" in caplog.messages
+
+
+def test_read_standard_xref_table__malformed__chained_tables_scanned_once():
+    body = _MALFORMED_XREF_BODY
+    data = body
+    previous_offset = None
+    for _ in range(100):
+        table_offset = len(data)
+        data += (
+            b"xref\n0 4\n"
+            b"0000000000 65535 f\r\n"
+            + b"xxxxxxxxxxxxxxxx 0\r\n" * 3
+            + b"trailer\n<< /Size 4 /Root 1 0 R"
+        )
+        if previous_offset is not None:
+            data += b" /Prev " + str(previous_offset).encode("ascii")
+        data += b" >>\n"
+        previous_offset = table_offset
+    data += b"startxref\n" + str(previous_offset).encode("ascii") + b"\n%%EOF\n"
+    stream = _GetBufferCountingBytesIO(data)
+
+    reader = PdfReader(stream)
+
+    # The whole stream must not be loaded and scanned again for every cross-reference table.
+    assert stream.getbuffer_calls == 1
+    assert reader.xref[0] == {
+        1: body.index(b"1 0 obj"),
+        2: body.index(b"2 0 obj"),
+        3: body.index(b"3 0 obj"),
+    }
+    assert len(reader.pages) == 1

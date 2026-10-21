@@ -1175,7 +1175,11 @@ class PdfDocCommon:
             for attr in inheritable_page_attributes:
                 if attr in pages:
                     inherit[attr] = pages[attr]
+            pages_reference = getattr(pages, "indirect_reference", object())
             for page in cast(ArrayObject, pages[PA.KIDS]):
+                if getattr(page, "indirect_reference", object()) == pages_reference:
+                    raise PdfReadError("Detected cyclic page references.")
+
                 addt = {}
                 if isinstance(page, IndirectObject):
                     addt["indirect_reference"] = page

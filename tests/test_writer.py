@@ -6,7 +6,7 @@ import subprocess
 from io import BytesIO
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Any
+from typing import Any, Dict, List
 from unittest import mock
 
 import pytest
@@ -20,7 +20,7 @@ from pypdf import (
     Transformation,
 )
 from pypdf.annotations import Link
-from pypdf.errors import PageSizeNotDefinedError, PyPdfError
+from pypdf.errors import LimitReachedError, PageSizeNotDefinedError, PyPdfError
 from pypdf.generic import (
     ArrayObject,
     ByteStringObject,
@@ -2852,3 +2852,89 @@ def test_unterminated_object__with_incremental_writer():
     writer.write(fi)
     b = fi.getvalue()
     assert b[-39:] == b"\nendstream\nendobj\nstartxref\n1240\n%%EOF\n"
+
+
+@pytest.mark.timeout(10)
+def test_clone_reader_document_root__incremental__large_size():
+    parts: List[bytes] = [b"%PDF-1.4\n"]
+    offsets: Dict[int, int] = {}
+
+    for object_number, body in (
+            (1, b"<< /Type /Catalog /Pages 2 0 R >>"),
+            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+            (3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] >>"),
+    ):
+        offsets[object_number] = sum(len(p) for p in parts)
+        parts.append(f"{object_number} 0 obj\n".encode())
+        parts.append(body + b"\n")
+        parts.append(b"endobj\n")
+
+    xref_offset = sum(len(p) for p in parts)
+    parts.append(b"xref\n")
+    parts.append(b"0 4\n")
+    parts.append(b"0000000000 65535 f \n")
+    parts.append(f"{offsets[1]:010d} 00000 n \n".encode())
+    parts.append(f"{offsets[2]:010d} 00000 n \n".encode())
+    parts.append(f"{offsets[3]:010d} 00000 n \n".encode())
+    parts.append(b"trailer\n<< /Root 1 0 R /Size 5000000 >>\n")
+    parts.append(f"startxref\n{xref_offset}\n%%EOF\n".encode())
+    data = b"".join(parts)
+
+    writer = PdfWriter(BytesIO(data), incremental=True)
+    assert writer._objects == [
+        DictionaryObject({
+            NameObject("/Pages"): IndirectObject(2, 0, writer),
+            NameObject("/Type"): NameObject("/Catalog")
+        }),
+        DictionaryObject({
+            NameObject("/Count"): NumberObject(1),
+            NameObject("/Kids"): ArrayObject([
+                IndirectObject(3, 0, writer)
+            ]),
+            NameObject("/Type"): NameObject("/Pages")
+        }),
+        DictionaryObject({
+            NameObject("/MediaBox"): ArrayObject([
+                NumberObject(0), NumberObject(0), NumberObject(1), NumberObject(1)
+            ]),
+            NameObject("/Parent"): IndirectObject(2, 0, writer),
+            NameObject("/Type"): NameObject("/Page")
+        })
+    ]
+
+
+def test_collect_incremental_clone_object_ids():
+    reader = PdfReader(RESOURCE_ROOT / "crazyones.pdf")
+
+    # No limit.
+    writer = PdfWriter()
+    assert writer._collect_incremental_clone_object_ids(reader) == list(range(1, 23))
+
+    # Size limit.
+    writer = PdfWriter(incremental_clone_object_count_limit=13)
+    with pytest.raises(
+            expected_exception=LimitReachedError,
+            match=r"^Incremental clone object count 22 exceeds maximum allowed count 13\.$"
+    ):
+        writer._collect_incremental_clone_object_ids(reader)
+
+    # Number limit.
+    writer = PdfWriter(incremental_clone_object_id_limit=17)
+    with pytest.raises(
+            expected_exception=LimitReachedError,
+            match=r"^Incremental clone object ID 22 exceeds maximum allowed ID 17\.$"
+    ):
+        writer._collect_incremental_clone_object_ids(reader)
+
+
+def test_clone_reader_document_root__incremental__unknown_object():
+    writer = PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+    data = BytesIO()
+    writer.write(data)
+    data.flush()
+
+    writer = PdfWriter(data, incremental=True)
+    reader = PdfReader(RESOURCE_ROOT / "crazyones.pdf")
+    with mock.patch.object(writer, "_collect_incremental_clone_object_ids", return_value=[*list(range(1, 23)), 42]):
+        writer.clone_reader_document_root(reader)

@@ -9,11 +9,13 @@ from unittest import mock
 import pytest
 
 from pypdf import PdfReader, PdfWriter
-from pypdf.errors import PdfReadError
+from pypdf.errors import LimitReachedError, PdfReadError
+from pypdf.filters import FlateDecode
 from pypdf.generic import (
     ArrayObject,
     DictionaryObject,
     EmbeddedFile,
+    EncodedStreamObject,
     NameObject,
     NullObject,
     TextStringObject,
@@ -302,3 +304,30 @@ def test_get_outline__cyclic_references__first_points_to_ancestor(caplog):
         message.startswith("Detected cycle in outline structure for {")
         for message in caplog.messages
     )
+
+
+def test_xfa__decompression_limit():
+    payload = b"A" * 100_0000
+    compressed = FlateDecode.encode(payload, 9)
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+
+    stream = EncodedStreamObject()
+    stream._data = compressed
+    stream[NameObject("/Filter")] = NameObject("/FlateDecode")
+    stream_reference = writer._add_object(stream)
+
+    acro = DictionaryObject()
+    acro[NameObject("/XFA")] = ArrayObject([TextStringObject("datasets"), stream_reference])
+    writer.root_object[NameObject("/AcroForm")] = writer._add_object(acro)
+
+    data = BytesIO()
+    writer.write(data)
+    data.flush()
+
+    reader = PdfReader(data)
+    with mock.patch("pypdf.filters.ZLIB_MAX_OUTPUT_LENGTH", 75_000), pytest.raises(
+            expected_exception=LimitReachedError, match=r"^Limit reached while decompressing. 902 bytes remaining.$"
+    ):
+        _ = reader.xfa

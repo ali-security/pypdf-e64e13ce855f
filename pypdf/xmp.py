@@ -20,12 +20,16 @@ from typing import (
 from xml.dom.expatbuilder import ExpatBuilderNS
 from xml.dom.minidom import Document
 from xml.dom.minidom import Element as XmlElement
+from xml.dom.xmlbuilder import Options
 from xml.parsers.expat import ExpatError, XMLParserType
 
 from ._protocols import XmpInformationProtocol
 from ._utils import StreamType, deprecate_no_replacement, deprecate_with_replacement
-from .errors import PdfReadError
+from .errors import LimitReachedError, PdfReadError
 from .generic import ContentStream, PdfObject
+
+XMP_MAX_INPUT_LENGTH = 5_000_000
+XMP_MAX_ELEMENT_COUNT = 100_000
 
 RDF_NAMESPACE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
 DC_NAMESPACE = "http://purl.org/dc/elements/1.1/"
@@ -233,6 +237,10 @@ class _XmpBuilder(ExpatBuilderNS):
     but not cases like quadratic entity expansion which can still cause quite some memory usage.
     """
 
+    def __init__(self, options: Optional[Options] = None) -> None:
+        super().__init__(options=options)
+        self._element_count = 0
+
     def custom_entity_declaration_handler(
             self,
             entity_name: str,
@@ -245,10 +253,17 @@ class _XmpBuilder(ExpatBuilderNS):
     ) -> None:
         raise ExpatError(f"Forbidden entities: {entity_name!r}")
 
+    def start_element_handler(self, name: str, attributes: List[str]) -> None:
+        self._element_count += 1
+        if self._element_count > XMP_MAX_ELEMENT_COUNT:
+            raise LimitReachedError(f"XMP metadata exceeds limit of {XMP_MAX_ELEMENT_COUNT} elements.")
+        super().start_element_handler(name=name, attributes=attributes)
+
     def install(self, parser: XMLParserType) -> None:
         super().install(parser)
 
         parser.EntityDeclHandler = self.custom_entity_declaration_handler
+        parser.StartElementHandler = self.start_element_handler
 
 
 class XmpInformation(XmpInformationProtocol, PdfObject):
@@ -265,6 +280,8 @@ class XmpInformation(XmpInformationProtocol, PdfObject):
         self.stream = stream
         try:
             data = self.stream.get_data()
+            if (length := len(data)) > XMP_MAX_INPUT_LENGTH:
+                raise LimitReachedError(f"XMP stream size {length} exceeds limit of {XMP_MAX_INPUT_LENGTH}.")
             doc_root: Document = _XmpBuilder().parseString(data)
         except (AttributeError, ExpatError) as e:
             raise PdfReadError(f"XML in XmpInformation was invalid: {e}")

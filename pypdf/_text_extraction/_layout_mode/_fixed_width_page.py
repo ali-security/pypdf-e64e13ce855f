@@ -11,6 +11,9 @@ from ._font import Font
 from ._text_state_manager import TextStateManager
 from ._text_state_params import TextStateParams
 
+WHITESPACE_LIMIT = 10_000
+NEWLINE_LIMIT = 1_000
+
 
 class BTGroup(TypedDict):
     """
@@ -140,6 +143,12 @@ def recurs_to_target_op(
                     excess_tx = round(_tj.tx - last_displaced_tx, 3) * (_idx != bt_idx)
                     # space_tx could be 0 if either Tz or font_size was 0 for this _tj.
                     spaces = int(excess_tx // _tj.space_tx) if _tj.space_tx else 0
+                    if spaces > WHITESPACE_LIMIT:
+                        logger_warning(
+                            f"Limiting excessive whitespace from {spaces} to {WHITESPACE_LIMIT} characters.",
+                            __name__,
+                        )
+                        spaces = WHITESPACE_LIMIT
                     new_text = f'{" " * spaces}{_tj.txt}'
 
                     last_ty = _tj.ty
@@ -369,12 +378,24 @@ def fixed_width_page(
             blank_lines = 0 if fh == 0 else (
                 int(abs(y_coord - last_y_coord) / (fh * font_height_weight)) - 1
             )
+            if blank_lines > NEWLINE_LIMIT:
+                logger_warning(
+                    f"Limiting excessive newlines from {blank_lines} to {NEWLINE_LIMIT}.",
+                    __name__,
+                )
+                blank_lines = NEWLINE_LIMIT
             lines.extend([""] * blank_lines)
         line = ""
         last_disp = 0.0
         for bt_op in line_data:
             offset = int(bt_op["tx"] // char_width)
             spaces = (offset - len(line)) * (ceil(last_disp) < int(bt_op["tx"]))
+            if spaces > WHITESPACE_LIMIT:
+                logger_warning(
+                    f"Limiting excessive whitespace from {spaces} to {WHITESPACE_LIMIT} characters.",
+                    __name__,
+                )
+                spaces = WHITESPACE_LIMIT
             line = f"{line}{' ' * spaces}{bt_op['text']}"
             last_disp = bt_op["displaced_tx"]
         if line.strip() or lines:

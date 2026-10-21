@@ -1,10 +1,12 @@
 """Test LZW-related code."""
-
+from io import BytesIO
 from pathlib import Path
 
 import pytest
 
+from pypdf import PdfReader, filters
 from pypdf._codecs._codecs import LzwCodec
+from pypdf.errors import LimitReachedError
 
 from . import get_data_from_url
 
@@ -80,3 +82,34 @@ def test_lzw_decoder_table_overflow(caplog):
 @pytest.mark.timeout(timeout=15, method="thread")
 def test_lzw_decoder_large_stream_performance(caplog):
     LzwCodec().decode(get_data_from_url(name="large_lzw_example_encoded.dat"))
+
+
+@pytest.mark.enable_socket
+def test_lzw_decoder__output_limit():
+    url = "https://github.com/user-attachments/files/23057035/lzw__output_limit.pdf"
+    name = "lzw__output_limit.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url, name=name)))
+    page = reader.pages[0]
+
+    with pytest.raises(
+            expected_exception=LimitReachedError, match=r"^Limit reached while decompressing: 1000000170 > 1000000000$"
+    ):
+        page.images[0].image.load()
+
+
+def test_lzw_decoder__output_limit_small(monkeypatch):
+    plain = b"0" * 10_000
+    encoded = LzwCodec().encode(plain)
+    assert len(encoded) < len(plain)
+
+    assert LzwCodec(max_output_length=10_000).decode(encoded) == plain
+    with pytest.raises(
+            expected_exception=LimitReachedError, match=r"^Limit reached while decompressing: \d+ > 9999$"
+    ):
+        LzwCodec(max_output_length=9_999).decode(encoded)
+
+    monkeypatch.setattr(filters, "LZW_MAX_OUTPUT_LENGTH", 9_999)
+    with pytest.raises(
+            expected_exception=LimitReachedError, match=r"^Limit reached while decompressing: \d+ > 9999$"
+    ):
+        filters.LZWDecode._decodeb(encoded)

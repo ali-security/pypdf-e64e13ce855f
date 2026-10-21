@@ -30,6 +30,7 @@ __author__ = "Mathieu Fenniak"
 __author_email__ = "biziqe@mathieu.fenniak.net"
 
 import logging
+import os
 import re
 import sys
 from io import BytesIO
@@ -516,41 +517,56 @@ class DictionaryObject(Dict[Any, Any], PdfObject):
             stream.write(b"\n")
         stream.write(b">>")
 
+    @classmethod
+    def _get_next_object_position(
+            cls, position_before: int, position_end: int, generations: List[int], pdf: PdfReaderProtocol
+    ) -> int:
+        out = position_end
+        for generation in generations:
+            for x in pdf.xref[generation].values():
+                if position_before < x <= position_end:
+                    out = min(out, x)
+        return out
+
+    @classmethod
+    def _read_unsized_from_stream(
+            cls, *, stream: StreamType, pdf: PdfReaderProtocol, length: int,
+    ) -> bytes:
+        # we are just pointing at beginning of the stream
+        current_position = stream.tell()
+
+        # Determine stream size.
+        try:
+            stream.seek(0, os.SEEK_END)
+            stream_length = stream.tell()
+        finally:
+            stream.seek(current_position)
+
+        object_position = cls._get_next_object_position(
+            position_before=current_position, position_end=stream_length, generations=list(pdf.xref), pdf=pdf
+        )
+
+        bytes_to_read = object_position - current_position
+        if bytes_to_read >= length:
+            raise LimitReachedError(f"Requested length of {bytes_to_read} exceeds maximum allowed length.")
+
+        # Read until the next object position.
+        read_value = stream.read(bytes_to_read)
+        endstream_position = read_value.find(b"endstream")
+        if endstream_position < 0:
+            raise PdfReadError(
+                f"Unable to find 'endstream' marker for obj starting at {current_position}."
+            )
+        # 9 = len(b"endstream")
+        stream.seek(current_position + endstream_position + 9)
+        return read_value[: endstream_position - 1]
+
     @staticmethod
     def read_from_stream(
         stream: StreamType,
         pdf: Optional[PdfReaderProtocol],
         forced_encoding: Union[None, str, List[str], Dict[int, str]] = None,
     ) -> "DictionaryObject":
-        def get_next_obj_pos(
-            p: int, p1: int, rem_gens: List[int], pdf: PdfReaderProtocol
-        ) -> int:
-            out = p1
-            for gen in rem_gens:
-                loc = pdf.xref[gen]
-                try:
-                    values = [x for x in loc.values() if p < x <= p1]
-                    if values:
-                        out = min(out, *values)
-                except ValueError:
-                    pass
-            return out
-
-        def read_unsized_from_stream(
-            stream: StreamType, pdf: PdfReaderProtocol
-        ) -> bytes:
-            # we are just pointing at beginning of the stream
-            eon = get_next_obj_pos(stream.tell(), 2**32, list(pdf.xref), pdf) - 1
-            curr = stream.tell()
-            rw = stream.read(eon - stream.tell())
-            p = rw.find(b"endstream")
-            if p < 0:
-                raise PdfReadError(
-                    f"Unable to find 'endstream' marker for obj starting at {curr}."
-                )
-            stream.seek(curr + p + 9)
-            return rw[: p - 1]
-
         tmp = stream.read(2)
         if tmp != b"<<":
             raise PdfReadError(
@@ -641,15 +657,16 @@ class DictionaryObject(Dict[Any, Any], PdfObject):
             if length is None:  # if the PDF is damaged
                 length = -1
             pstart = stream.tell()
+
+            from ..filters import MAX_DECLARED_STREAM_LENGTH  # noqa: PLC0415
             if length > 0:
-                from ..filters import MAX_DECLARED_STREAM_LENGTH  # noqa: PLC0415
                 if length > MAX_DECLARED_STREAM_LENGTH:
                     raise LimitReachedError(f"Declared stream length of {length} exceeds maximum allowed length.")
 
                 data["__streamdata__"] = stream.read(length)
             else:
                 data["__streamdata__"] = read_until_regex(
-                    stream, re.compile(b"endstream")
+                    stream=stream, regex=re.compile(b"endstream"), length=MAX_DECLARED_STREAM_LENGTH,
                 )
             e = read_non_whitespace(stream)
             ndstream = stream.read(8)
@@ -668,7 +685,9 @@ class DictionaryObject(Dict[Any, Any], PdfObject):
                     data["__streamdata__"] = data["__streamdata__"][:-1]
                 elif pdf is not None and not pdf.strict:
                     stream.seek(pstart, 0)
-                    data["__streamdata__"] = read_unsized_from_stream(stream, pdf)
+                    data["__streamdata__"] = DictionaryObject._read_unsized_from_stream(
+                        stream=stream, pdf=pdf, length=MAX_DECLARED_STREAM_LENGTH
+                    )
                     pos = stream.tell()
                 else:
                     stream.seek(pos, 0)
@@ -1165,6 +1184,7 @@ class ContentStream(DecodedStreamObject):
     * when .set_data() is called, ._operations is set to None.
     * when .operations is set, ._data is set to None.
     """
+    _OPERATOR_LENGTH_LIMIT = 128
 
     def __init__(
         self,
@@ -1323,7 +1343,9 @@ class ContentStream(DecodedStreamObject):
                 break
             stream.seek(-1, 1)
             if peek.isalpha() or peek in (b"'", b'"'):
-                operator = read_until_regex(stream, NameObject.delimiter_pattern)
+                operator = read_until_regex(
+                    stream=stream, regex=NameObject.delimiter_pattern, length=self._OPERATOR_LENGTH_LIMIT
+                )
                 if operator == b"BI":
                     # begin inline image - a completely different parsing
                     # mechanism is required, of course... thanks buddy...

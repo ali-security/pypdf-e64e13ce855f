@@ -32,7 +32,7 @@ from pypdf._utils import (
     skip_over_comment,
     skip_over_whitespace,
 )
-from pypdf.errors import DeprecationError, PdfReadError, PdfStreamError
+from pypdf.errors import DeprecationError, LimitReachedError, PdfReadError, PdfStreamError
 
 from . import is_sublist
 
@@ -95,7 +95,110 @@ def test_skip_over_comment(stream, remainder):
 
 def test_read_until_regex_premature_ending_name():
     stream = io.BytesIO(b"")
-    assert read_until_regex(stream, re.compile(b".")) == b""
+    assert read_until_regex(stream=stream, regex=re.compile(b".")) == b""
+
+
+def test_read_until_regex_match_in_first_chunk():
+    """Match within the first 16-byte chunk."""
+    stream = io.BytesIO(b"hello world")
+    result = read_until_regex(stream=stream, regex=re.compile(b" "))
+    assert result == b"hello"
+    assert stream.tell() == 5
+
+
+def test_read_until_regex_match_in_second_chunk():
+    """Match lands in the second chunk (past first 16 bytes)."""
+    payload = b"0123456789abcdefghij"
+    assert len(payload) == 20
+    data = payload + b" rest"
+    stream = io.BytesIO(data)
+    result = read_until_regex(stream=stream, regex=re.compile(b" "))
+    assert result == payload
+    assert stream.tell() == 20
+
+
+def test_read_until_regex_match_at_chunk_boundary():
+    """Delimiter sits exactly at byte 16 (first byte of second chunk)."""
+    payload = b"0123456789abcdef"
+    assert len(payload) == 16
+    data = payload + b" after"
+    stream = io.BytesIO(data)
+    result = read_until_regex(stream=stream, regex=re.compile(b" "))
+    assert result == payload
+    assert stream.tell() == 16
+
+
+def test_read_until_regex_multi_byte_spanning_boundary():
+    """Multi-byte regex pattern spans across a chunk boundary."""
+    # "X" is byte 15 (last of first chunk), "Y" is byte 16 (first of second chunk).
+    payload = b"0123456789abcde"
+    assert len(payload) == 15
+    data = payload + b"XYafter"
+    stream = io.BytesIO(data)
+    result = read_until_regex(stream=stream, regex=re.compile(b"XY"))
+    assert result == payload
+    assert stream.tell() == 15
+
+
+def test_read_until_regex_no_match_exhausted():
+    """No match - stream is fully consumed and all data returned."""
+    data = b"0123456789" * 10
+    stream = io.BytesIO(data)
+    result = read_until_regex(stream=stream, regex=re.compile(b"ZZZ"))
+    assert result == data
+
+
+def test_read_until_regex_exponential_chunk_growth():
+    """Verify correctness with long input that exercises chunk doubling."""
+    payload = (b"0123456789abcdef" * 3125)[:50_000]
+    assert len(payload) == 50_000
+    data = payload + b"|done"
+    stream = io.BytesIO(data)
+    result = read_until_regex(stream=stream, regex=re.compile(rb"\|"))
+    assert result == payload
+    assert stream.tell() == 50_000
+
+
+def test_read_until_regex_match_spanning_later_boundary():
+    """Multi-byte match spanning a boundary after chunk size has grown."""
+    # Reads are 16 and 32 bytes, so "END" at offsets 47-49 spans the
+    # boundary between the second and the third chunk.
+    payload = (b"0123456789abcdef" * 3)[:47]
+    assert len(payload) == 47
+    data = payload + b"ENDrest"
+    stream = io.BytesIO(data)
+    result = read_until_regex(stream=stream, regex=re.compile(b"END"))
+    assert result == payload
+    assert stream.tell() == 47
+
+
+def test_read_until_regex_tail_overlap_is_fixed():
+    """
+    The tail overlap stays at 16 bytes while the chunk size grows.
+
+    Reads are 16, 32 and 64 bytes. A 16-byte pattern placed across the
+    boundary of the third chunk only matches if the kept tail is at least
+    16 bytes long.
+    """
+    pattern = b"ABCDEFGHIJKLMNOP"
+    assert len(pattern) == 16
+    payload = b"x" * 47
+    data = payload + pattern + b"rest"
+    stream = io.BytesIO(data)
+    result = read_until_regex(stream=stream, regex=re.compile(re.escape(pattern)))
+    assert result == payload
+    assert stream.tell() == 47
+
+
+def test_read_until_regex_length_limit():
+    """The length limit stops reading before the whole stream is consumed."""
+    stream = io.BytesIO(b"0" * 1_000_000)
+    with pytest.raises(
+            expected_exception=LimitReachedError,
+            match=r"^Read stream length of 112 exceeds maximum allowed length of 100\.$"
+    ):
+        read_until_regex(stream=stream, regex=re.compile(b" "), length=100)
+    assert stream.tell() == 112
 
 
 @pytest.mark.parametrize(

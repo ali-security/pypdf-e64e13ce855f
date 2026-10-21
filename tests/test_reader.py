@@ -7,6 +7,7 @@ import zlib
 from io import BytesIO
 from pathlib import Path
 from typing import List, Union
+from unittest import mock
 
 import pytest
 
@@ -1860,7 +1861,9 @@ def test_issue2886(caplog):
     url = "https://github.com/user-attachments/files/17187711/crash-e8a85d82de01cab5eb44e7993304d8b9d1544970.pdf"
     name = "issue2886.pdf"
 
-    with pytest.raises(PdfReadError, match="Unexpected empty line in Xref table."):
+    # Actual: 100_067
+    with mock.patch("pypdf.generic._base.NumberObject._LENGTH_LIMIT", 200_000), \
+            pytest.raises(PdfReadError, match="Unexpected empty line in Xref table."):
         _ = PdfReader(BytesIO(get_data_from_url(url, name=name)))
 
 

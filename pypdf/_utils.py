@@ -64,6 +64,7 @@ else:
 from .errors import (
     STREAM_TRUNCATED_PREMATURELY,
     DeprecationError,
+    LimitReachedError,
     PdfStreamError,
 )
 
@@ -245,30 +246,51 @@ def skip_over_comment(stream: StreamType) -> None:
                 raise PdfStreamError("File ended unexpectedly.")
 
 
-def read_until_regex(stream: StreamType, regex: Pattern[bytes]) -> bytes:
+def read_until_regex(*, stream: StreamType, regex: Pattern[bytes], length: int = sys.maxsize) -> bytes:
     """
     Read until the regular expression pattern matched (ignore the match).
     Treats EOF on the underlying stream as the end of the token to be matched.
 
     Args:
-        regex: re.Pattern
+        stream: The stream to read from.
+        regex: The pattern to search for.
+        length: The (approximated) maximum number of bytes to read before raising an exception.
 
     Returns:
         The read bytes.
 
     """
-    name = b""
+    parts: List[bytes] = []
+    total_length = 0
+    tail = b""
+    chunk_size = 16
     while True:
-        tok = stream.read(16)
-        if not tok:
-            return name
-        m = regex.search(name + tok)
-        if m is not None:
-            stream.seek(m.start() - (len(name) + len(tok)), 1)
-            name = (name + tok)[: m.start()]
-            break
-        name += tok
-    return name
+        token = stream.read(chunk_size)
+        if not token:
+            return b"".join(parts)
+        token_length = len(token)
+        if (current_length := total_length + token_length) >= length:
+            raise LimitReachedError(
+                f"Read stream length of {current_length} exceeds maximum allowed length of {length}."
+            )
+
+        # Search overlap of previous tail + new chunk to catch
+        # multi-byte regex matches spanning chunk boundaries.
+        current_buffer = tail + token
+        search_match = regex.search(current_buffer)
+        parts.append(token)
+        if search_match is not None:
+            overlap = len(tail)
+            actual_start = total_length - overlap + search_match.start()
+            stream.seek(actual_start - total_length - token_length, 1)
+            return b"".join(parts)[:actual_start]
+        total_length += token_length
+
+        # Fixed overlap: 16 bytes is sufficient for the short
+        # delimiter patterns used in PDF parsing.
+        tail = token[-16:]
+        if chunk_size < 8192:
+            chunk_size <<= 1
 
 
 def read_block_backwards(stream: StreamType, to_read: int) -> bytes:

@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 import pytest
 
-from pypdf import PdfReader, mult
+from pypdf import PdfReader, PdfWriter, mult
 from pypdf._text_extraction import set_custom_rtl
 from pypdf._text_extraction._layout_mode._fixed_width_page import (
     BTGroup,
@@ -563,3 +563,108 @@ def test_fixed_width_page__excessive_needed_spaces(caplog):
 
     assert result == " " * 10_000 + "X"
     assert caplog.messages == ["Limiting excessive whitespace from 13000 to 10000 characters."]
+
+
+def test_page__extract_text__xform__self_references(caplog):
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=10, height=10)
+
+    form = ContentStream(stream=None, pdf=writer)
+    form[NameObject("/Type")] = NameObject("/XObject")
+    form[NameObject("/Subtype")] = NameObject("/Form")
+    form.set_data(b"/X1 Do")
+    form_reference = writer._add_object(form)
+    form[NameObject("/Resources")] = DictionaryObject({
+        NameObject("/XObject"): DictionaryObject({
+            NameObject("/X1"): form_reference
+        })
+    })
+
+    page[NameObject("/Resources")] = form[NameObject("/Resources")]
+    content = ContentStream(stream=None, pdf=writer)
+    content.set_data(b"q /X1 Do Q")
+    page.replace_contents(content)
+
+    assert page.extract_text() == ""
+    assert caplog.messages == ["Detected cyclic form XObject reference, skipping /X1."]
+
+
+def _make_form_xobject(writer, data):
+    form = ContentStream(stream=None, pdf=writer)
+    form[NameObject("/Type")] = NameObject("/XObject")
+    form[NameObject("/Subtype")] = NameObject("/Form")
+    form.set_data(data)
+    return form, writer._add_object(form)
+
+
+def test_page__extract_text__xform__mutual_references(caplog):
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=10, height=10)
+
+    form1, form1_reference = _make_form_xobject(writer, b"/X2 Do")
+    form2, form2_reference = _make_form_xobject(writer, b"/X1 Do")
+    resources = DictionaryObject({
+        NameObject("/XObject"): DictionaryObject({
+            NameObject("/X1"): form1_reference,
+            NameObject("/X2"): form2_reference,
+        })
+    })
+    form1[NameObject("/Resources")] = resources
+    form2[NameObject("/Resources")] = resources
+
+    page[NameObject("/Resources")] = resources
+    content = ContentStream(stream=None, pdf=writer)
+    content.set_data(b"q /X1 Do Q")
+    page.replace_contents(content)
+
+    assert page.extract_text() == ""
+    assert caplog.messages == ["Detected cyclic form XObject reference, skipping /X1."]
+
+
+def test_page__extract_text__xform__repeated_self_references(caplog):
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=10, height=10)
+
+    form, form_reference = _make_form_xobject(writer, b"/X1 Do /X1 Do /X1 Do")
+    form[NameObject("/Resources")] = DictionaryObject({
+        NameObject("/XObject"): DictionaryObject({
+            NameObject("/X1"): form_reference
+        })
+    })
+
+    page[NameObject("/Resources")] = form[NameObject("/Resources")]
+    content = ContentStream(stream=None, pdf=writer)
+    content.set_data(b"q /X1 Do /X1 Do Q")
+    page.replace_contents(content)
+
+    assert page.extract_text() == ""
+    assert caplog.messages == ["Detected cyclic form XObject reference, skipping /X1."] * 6
+
+
+def test_page__extract_text__xform__repeated_non_cyclic_references(caplog):
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=10, height=10)
+
+    font = DictionaryObject({
+        NameObject("/Type"): NameObject("/Font"),
+        NameObject("/Subtype"): NameObject("/Type1"),
+        NameObject("/BaseFont"): NameObject("/Helvetica"),
+    })
+    form, form_reference = _make_form_xobject(writer, b"BT /F1 12 Tf (Hello) Tj ET")
+    form[NameObject("/Resources")] = DictionaryObject({
+        NameObject("/Font"): DictionaryObject({
+            NameObject("/F1"): writer._add_object(font)
+        })
+    })
+
+    page[NameObject("/Resources")] = DictionaryObject({
+        NameObject("/XObject"): DictionaryObject({
+            NameObject("/X1"): form_reference
+        })
+    })
+    content = ContentStream(stream=None, pdf=writer)
+    content.set_data(b"q /X1 Do Q q /X1 Do Q")
+    page.replace_contents(content)
+
+    assert page.extract_text().count("Hello") == 2
+    assert not any("cyclic form XObject" in message for message in caplog.messages)

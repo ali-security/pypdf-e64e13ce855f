@@ -92,7 +92,7 @@ def test_lzw_decoder__output_limit():
     page = reader.pages[0]
 
     with pytest.raises(
-            expected_exception=LimitReachedError, match=r"^Limit reached while decompressing: 1000000170 > 1000000000$"
+            expected_exception=LimitReachedError, match=r"^Limit reached while decompressing: 75000828 > 75000000$"
     ):
         page.images[0].image.load()
 

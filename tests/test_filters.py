@@ -1063,3 +1063,18 @@ def test_flatedecode__upper_limits():
             match=r"^Row length of 4160001 exceeds defined limit of 4000000\.$"
     ):
         FlateDecode.decode(data=encoded, decode_parms=parameters)
+
+
+@pytest.mark.timeout(5)  # Has been 20 seconds before.
+def test_flatedecode__decode_png_prediction__speed():
+    columns = 4096
+    rows = 120000
+    row_length = columns + 1  # +1 for PNG filter byte
+
+    # Build raw PNG-predicted data: every row starts with filter byte 0 (PNG None)
+    raw = bytearray(rows * row_length)
+    for row in range(rows):
+        raw[row * row_length] = 0
+    data = bytes(raw)
+
+    FlateDecode._decode_png_prediction(data=data, columns=columns, rowlength=row_length)

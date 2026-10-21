@@ -264,11 +264,11 @@ class FlateDecode:
             logger_warning("Image data is not rectangular. Adding padding.", __name__)
             data += b"\x00" * (rowlength - remainder)
             assert len(data) % rowlength == 0
-        output = []
-        prev_rowdata = (0,) * rowlength
+        output = bytearray()
+        prev_rowdata = bytes(rowlength)
         bpp = (rowlength - 1) // columns  # recomputed locally to not change params
         for row in range(0, len(data), rowlength):
-            rowdata: List[int] = list(data[row : row + rowlength])
+            rowdata = bytearray(data[row : row + rowlength])
             filter_byte = rowdata[0]
 
             if filter_byte == 0:
@@ -317,8 +317,8 @@ class FlateDecode:
                 raise PdfReadError(
                     f"Unsupported PNG filter {filter_byte!r}"
                 )  # pragma: no cover
-            prev_rowdata = tuple(rowdata)
-            output.extend(rowdata[1:])
+            prev_rowdata = bytes(rowdata)
+            output += rowdata[1:]
         return bytes(output)
 
     @staticmethod
